@@ -1,0 +1,23 @@
+{
+  "name": "sqli-lab-week5",
+  "version": "1.0.0",
+  "description": "Deliberately vulnerable Node.js web app for teaching SQL Injection (Week 5 - Software Security). FOR EDUCATIONAL USE ON LOCALHOST ONLY.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "secure": "SECURE=1 node server.js"
+  },
+  "keywords": [
+    "security",
+    "education",
+    "sql-injection",
+    "lab",
+    "owasp"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "sql.js": "^1.12.0"
+  }
+}
